@@ -127,7 +127,9 @@ impl SealTestCluster {
                     master_keys: MasterKeys::Open { master_key },
                     key_server_oid_to_pop: HashMap::new(),
                     options: KeyServerOptions {
-                        network: Network::TestCluster(SealPackage::Custom(seal_package)),
+                        network: Network::TestCluster {
+                            seal_package: SealPackage::Custom(seal_package),
+                        },
                         server_mode: ServerMode::Open {
                             key_server_object_id,
                         },
