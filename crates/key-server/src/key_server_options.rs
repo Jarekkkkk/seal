@@ -167,6 +167,7 @@ impl KeyServerOptions {
         key_server_object_id: ObjectID,
     ) -> Self {
         Self {
+            network,
             sdk_version_requirement: default_sdk_version_requirement(),
             server_mode: ServerMode::Open {
                 key_server_object_id,
@@ -177,13 +178,13 @@ impl KeyServerOptions {
             session_key_ttl_max: default_session_key_ttl_max(),
             rpc_config: RpcConfig::default(),
             metrics_push_config: None,
-            network,
         }
     }
 
     #[cfg(test)]
     pub fn new_for_testing(network: Network) -> Self {
         Self {
+            network,
             sdk_version_requirement: default_sdk_version_requirement(),
             server_mode: ServerMode::Open {
                 key_server_object_id: ObjectID::random(),
@@ -194,7 +195,6 @@ impl KeyServerOptions {
             session_key_ttl_max: default_session_key_ttl_max(),
             rpc_config: RpcConfig::default(),
             metrics_push_config: None,
-            network,
         }
     }
 
