@@ -1,6 +1,7 @@
 // Copyright (c), Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::key_server_options::SealPackage::Custom;
 use crate::metrics_push::MetricsPushConfig;
 use crate::time::from_mins;
 use crate::types::Network;
@@ -91,6 +92,29 @@ impl Default for RetryConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SealPackage {
+    Testnet,
+    Mainnet,
+    Custom(ObjectID),
+}
+
+impl SealPackage {
+    pub fn get_seal_package(&self) -> ObjectID {
+        match self {
+            SealPackage::Testnet => ObjectID::from_hex_literal(
+                "0x1b89aca0d34b1179c0a742de8a7d7c40af457053c7103b0622f55f1b8c9a6c38",
+            )
+            .unwrap(),
+            SealPackage::Mainnet => ObjectID::from_hex_literal(
+                "0x1b89aca0d34b1179c0a742de8a7d7c40af457053c7103b0622f55f1b8c9a6c38",
+            )
+            .unwrap(),
+            SealPackage::Custom(seal_package) => *seal_package,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyServerOptions {
     /// The network this key server is running on.
@@ -136,9 +160,6 @@ pub struct KeyServerOptions {
     /// Optional configuration for pushing metrics to an external endpoint (e.g., seal-proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_push_config: Option<MetricsPushConfig>,
-
-    /// Object ID for an instance of the Seal Move package.
-    pub seal_package: ObjectID,
 }
 
 impl KeyServerOptions {
@@ -157,7 +178,6 @@ impl KeyServerOptions {
             session_key_ttl_max: default_session_key_ttl_max(),
             rpc_config: RpcConfig::default(),
             metrics_push_config: None,
-            seal_package: default_seal_package(&network),
             network,
         }
     }
@@ -175,7 +195,6 @@ impl KeyServerOptions {
             session_key_ttl_max: default_session_key_ttl_max(),
             rpc_config: RpcConfig::default(),
             metrics_push_config: None,
-            seal_package: default_seal_package(&network),
             network,
         }
     }
@@ -273,16 +292,6 @@ impl KeyServerOptions {
     }
 }
 
-fn default_seal_package(network: &Network) -> ObjectID {
-    match network {
-        Network::Testnet => ObjectID::from_hex_literal(
-            "0x1b89aca0d34b1179c0a742de8a7d7c40af457053c7103b0622f55f1b8c9a6c38",
-        )
-        .unwrap(),
-        _ => ObjectID::from_hex_literal("0x").unwrap(), // TODO
-    }
-}
-
 fn default_rgp_update_interval() -> Duration {
     Duration::from_secs(60)
 }
@@ -316,7 +325,6 @@ server_mode: !Open
 rgp_update_interval: '5s'
 allowed_staleness: '2s'
 session_key_ttl_max: '60s'
-seal_package: '0x01'
 "#;
 
     let options: KeyServerOptions =
@@ -337,9 +345,10 @@ seal_package: '0x01'
 network: !Custom
   node_url: https://node.dk
   use_default_mainnet_for_mvr: false
+  seal_package: !Custom
+    '0x01'
 server_mode: !Open
   key_server_object_id: '0x0'
-seal_package: '0x01'
 "#;
     let options: KeyServerOptions = serde_yaml::from_str(valid_configuration_custom_network)
         .expect("Failed to parse valid configuration");
@@ -350,6 +359,7 @@ seal_package: '0x01'
         Network::Custom {
             node_url: Some("https://node.dk".to_string()),
             use_default_mainnet_for_mvr: Some(false),
+            seal_package: Custom(ObjectID::from_single_byte(1))
         }
     );
 
@@ -362,10 +372,11 @@ fn test_parse_custom_network_with_env_var() {
     use crate::mvr::resolve_network;
     // Test that NODE_URL can be omitted from config when not set in env
     let config_without_url = r#"
-network: !Custom {}
+network: !Custom
+  seal_package: !Custom
+    '0x1'
 server_mode: !Open
   key_server_object_id: '0x0'
-seal_package: '0x01'
 "#;
 
     let options: KeyServerOptions = serde_yaml::from_str(config_without_url)
@@ -412,7 +423,6 @@ server_mode: !Permissioned
 rgp_update_interval: '5s'
 allowed_staleness: '2s'
 session_key_ttl_max: '60s'
-seal_package: '0x01'
 "#;
 
     let options: KeyServerOptions =
@@ -444,7 +454,6 @@ server_mode: !Permissioned
         derivation_index: 0
       key_server_object_id: "0xaaaa000000000000000000000000000000000000000000000000000000000001"
       package_ids:
-seal_package: '0x01'
 "#;
     let empty_pkg_expected_error = "Client configuration must have at least one package ID: alice";
 
@@ -465,7 +474,6 @@ server_mode: !Permissioned
       package_ids:
         - "0x2222222222222222222222222222222222222222222222222222222222222222"
         - "0x2222222222222222222222222222222222222222222222222222222222222223"
-seal_package: '0x01'
 "#;
     let dup_ks_oid_expected_error =
         "Duplicate key server object ID: 0xaaaa000000000000000000000000000000000000000000000000000000000001";
@@ -487,7 +495,6 @@ server_mode: !Permissioned
       package_ids:
         - "0x1111111111111111111111111111111111111111111111111111111111111111"
         - "0x2222222222222222222222222222222222222222222222222222222222222223"
-seal_package: '0x01'
 "#;
     let dup_pkg_id_expected_error =
         "Duplicate package ID: 0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -510,7 +517,6 @@ server_mode: !Permissioned
       package_ids:
         - "0x2222222222222222222222222222222222222222222222222222222222222222"
         - "0x2222222222222222222222222222222222222222222222222222222222222223"
-seal_package: '0x01'
 "#;
     let dup_env_var_expected_error = "Duplicate environment variable: BOB_BLS_KEY";
 
@@ -531,7 +537,6 @@ server_mode: !Permissioned
       package_ids:
         - "0x2222222222222222222222222222222222222222222222222222222222222222"
         - "0x2222222222222222222222222222222222222222222222222222222222222223"
-seal_package: '0x01'
 "#;
     let dup_derivation_index_expected_error = "Duplicate derivation index: 0";
 
@@ -552,7 +557,6 @@ server_mode: !Permissioned
       package_ids:
         - "0x2222222222222222222222222222222222222222222222222222222222222222"
         - "0x2222222222222222222222222222222222222222222222222222222222222223"
-seal_package: '0x01'
 "#;
     let non_incrementing_index_expected_error =
         "Derivation indexes must be incremental, starting from 0";

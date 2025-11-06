@@ -3,7 +3,7 @@
 
 use crate::errors::InternalError::UnsupportedPackageId;
 use crate::key_server_options::{
-    ClientConfig, ClientKeyType, KeyServerOptions, RetryConfig, RpcConfig, ServerMode,
+    ClientConfig, ClientKeyType, KeyServerOptions, RetryConfig, RpcConfig, SealPackage, ServerMode,
 };
 use crate::master_keys::MasterKeys;
 use crate::sui_rpc_client::SuiRpcClient;
@@ -658,7 +658,7 @@ async fn create_server(
     seal_package: ObjectID,
 ) -> Server {
     let options = KeyServerOptions {
-        network: Network::TestCluster,
+        network: Network::TestCluster(SealPackage::Custom(seal_package)),
         server_mode: ServerMode::Permissioned { client_configs },
         metrics_host_port: 0,
         rgp_update_interval: Duration::from_secs(60),
@@ -667,7 +667,6 @@ async fn create_server(
         session_key_ttl_max: from_mins(30),
         rpc_config: RpcConfig::default(),
         metrics_push_config: None,
-        seal_package,
     };
 
     let vars = vars
