@@ -287,7 +287,7 @@ impl Server {
         };
 
         let staleness_check = Command::move_call(
-            self.options.network.get_seal_package(),
+            self.options.network.seal_package_id(),
             Identifier::from_str(STALENESS_MODULE).unwrap(),
             Identifier::from_str(STALENESS_FUNCTION).unwrap(),
             vec![],
@@ -401,7 +401,7 @@ impl Server {
     fn staleness_module_id(&self) -> String {
         format!(
             "{}::{}",
-            self.options.network.get_seal_package(),
+            self.options.network.seal_package_id(),
             STALENESS_MODULE
         )
     }
