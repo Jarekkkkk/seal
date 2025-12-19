@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crypto::{elgamal, ibe};
-use fastcrypto::ed25519::{Ed25519PublicKey, Ed25519Signature};
 use serde::{Deserialize, Serialize};
-use sui_sdk_types::{Address as SuiAddress, UserSignature};
+use sui_sdk_types::{Address as SuiAddress, Ed25519PublicKey, Ed25519Signature, UserSignature};
 
 pub type ElGamalPublicKey = elgamal::PublicKey<ibe::UserSecretKey>;
 pub type ElgamalEncryption = elgamal::Encryption<ibe::UserSecretKey>;
