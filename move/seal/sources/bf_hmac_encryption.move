@@ -175,7 +175,7 @@ public fun decrypt(
     };
 
     // Get the vector indices of the remaining shares.
-    let mut remaining_indices = vector::empty();
+    let mut remaining_indices = vector[];
     indices.length().do!(|i| {
         if (!given_indices.contains(&i)) {
             remaining_indices.push_back(i);
@@ -393,7 +393,7 @@ public fun parse_encrypted_object(object: vector<u8>): EncryptedObject {
     let id = bcs.peel_vec_u8();
 
     // services is a vector of tuples of the form (address, u8).
-    let mut services: vector<address> = vector::empty();
+    let mut services: vector<address> = vector[];
     let indices = bcs.peel_vec!(|service| {
         services.push_back(service.peel_address());
         service.peel_u8()
@@ -950,13 +950,13 @@ fun test_decryption_from_sdk() {
 
 #[test, expected_failure]
 fun test_all_unique_failure() {
-    assert_all_unique(&vector[1, 2, 3, 1], 0);
+    assert_all_unique(&vector[1u8, 2u8, 3u8, 1u8], 0);
 }
 
 #[test]
 fun test_all_unique_success() {
-    assert_all_unique(&vector[4, 1, 2, 3], 0);
-    assert_all_unique(&vector[1], 1);
+    assert_all_unique(&vector[4u8, 1u8, 2u8, 3u8], 0);
+    assert_all_unique(&vector[1u8], 1);
     assert_all_unique(&vector<u8>[], 2);
 }
 

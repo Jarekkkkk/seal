@@ -5,14 +5,14 @@
 
 use anyhow::{anyhow, Result};
 use fastcrypto::bls12381::min_sig::BLS12381PublicKey;
-use fastcrypto::groups::bls12381::G2Element;
+use fastcrypto::groups::bls12381::{G1Element, G2Element};
 use fastcrypto_tbls::ecies_v1::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use sui_sdk_types::Address;
 use sui_types::collection_types::VecSet;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct VecMap<K, V>(pub sui_types::collection_types::VecMap<K, V>);
 
 #[derive(Deserialize, Debug)]
@@ -25,7 +25,7 @@ pub struct KeyServerV2 {
 
 impl KeyServerV2 {
     /// Extract threshold and partial key servers from KeyServerV2. Returns error if ServerType is Independent.
-    pub fn extract_committee_info(self) -> Result<(u16, VecMap<Address, PartialKeyServer>)> {
+    pub fn extract_committee_info(self) -> Result<(u16, Vec<PartialKeyServer>)> {
         match self.server_type {
             ServerType::Committee {
                 threshold,
@@ -33,6 +33,38 @@ impl KeyServerV2 {
                 ..
             } => Ok((threshold, partial_key_servers)),
             ServerType::Independent { .. } => Err(anyhow!("Invalid independent key server type")),
+        }
+    }
+
+    /// Convert partial key servers to a HashMap mapping member addresses to PartialKeyServerInfo.
+    /// Returns error if ServerType is Independent.
+    pub fn to_partial_key_servers(
+        &self,
+        members: &[Address],
+    ) -> Result<HashMap<Address, PartialKeyServerInfo>> {
+        match &self.server_type {
+            ServerType::Committee {
+                partial_key_servers,
+                ..
+            } => partial_key_servers
+                .iter()
+                .map(|partial_ks| {
+                    let party_id = partial_ks.party_id;
+                    let member_addr = members.get(party_id as usize).ok_or_else(|| {
+                        anyhow!("Party ID {} out of range for members list", party_id)
+                    })?;
+                    Ok((
+                        *member_addr,
+                        PartialKeyServerInfo {
+                            party_id: partial_ks.party_id,
+                            partial_pk: partial_ks.partial_pk,
+                            name: partial_ks.name.clone(),
+                            url: partial_ks.url.clone(),
+                        },
+                    ))
+                })
+                .collect(),
+            ServerType::Independent { .. } => Err(anyhow!("KeyServer is not of type Committee")),
         }
     }
 }
@@ -52,15 +84,16 @@ pub enum ServerType {
     Committee {
         version: u32,
         threshold: u16,
-        partial_key_servers: VecMap<Address, PartialKeyServer>,
+        partial_key_servers: Vec<PartialKeyServer>,
     },
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct PartialKeyServer {
+    pub name: String,
+    pub url: String,
     #[serde(deserialize_with = "deserialize_partial_pk")]
     pub partial_pk: G2Element,
-    pub url: String,
     pub party_id: u16,
 }
 
@@ -76,19 +109,39 @@ pub struct Field<K, V> {
     pub value: V,
 }
 
+/// Helper struct for deserializing UID from Move objects.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+pub struct UidWrapper {
+    pub id: Address,
+}
+
+/// Dynamic field wrapper for deserializing Field<Wrapper<K>, V> from BCS.
+/// This includes the full UID structure as it appears in the Move object.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+pub struct FieldWrapper<K, V> {
+    pub id: UidWrapper,
+    pub name: Wrapper<K>,
+    pub value: V,
+}
+
 #[derive(Clone)]
 pub struct PartialKeyServerInfo {
     pub party_id: u16,
     pub partial_pk: G2Element,
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct MemberInfo {
     #[serde(deserialize_with = "deserialize_enc_pk")]
-    pub enc_pk: PublicKey<G2Element>,
+    pub enc_pk: PublicKey<G1Element>,
     #[serde(deserialize_with = "deserialize_signing_pk")]
     pub signing_pk: BLS12381PublicKey,
     pub url: String,
+    pub name: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -101,6 +154,7 @@ pub enum CommitteeState {
         partial_pks: Vec<Vec<u8>>,
         #[serde(deserialize_with = "deserialize_move_bytes")]
         pk: Vec<u8>,
+        messages_hash: Vec<u8>,
         approvals: VecSet<Address>,
     },
     Finalized,
@@ -198,6 +252,7 @@ impl SealCommittee {
                 Ok((
                     *member_addr,
                     ParsedMemberInfo {
+                        name: info.name.clone(),
                         party_id: party_id as u16,
                         address: *member_addr,
                         enc_pk: info.enc_pk.clone(),
@@ -209,11 +264,19 @@ impl SealCommittee {
     }
 }
 
+/// Event emitted when a new committee rotation is initiated.
+#[derive(Deserialize, Debug)]
+pub struct CommitteeRotationInitiatedEvent {
+    pub committee_id: Address,
+    pub old_committee_id: Address,
+}
+
 /// Helper struct storing member info with deserialized public keys.
 pub struct ParsedMemberInfo {
+    pub name: String,
     pub party_id: u16,
     pub address: Address,
-    pub enc_pk: PublicKey<G2Element>,
+    pub enc_pk: PublicKey<G1Element>,
     pub signing_pk: BLS12381PublicKey,
 }
 
@@ -242,6 +305,51 @@ macro_rules! move_bytes_deserializer {
 }
 
 move_bytes_deserializer!(deserialize_move_bytes, Vec<u8>);
-move_bytes_deserializer!(deserialize_enc_pk, PublicKey<G2Element>);
+move_bytes_deserializer!(deserialize_enc_pk, PublicKey<G1Element>);
 move_bytes_deserializer!(deserialize_signing_pk, BLS12381PublicKey);
 move_bytes_deserializer!(deserialize_partial_pk, G2Element);
+
+// ===== Upgrade Manager Types =====
+
+/// Vote type for upgrade proposals.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum UpgradeVote {
+    Approve,
+    Reject,
+}
+
+/// Package digest newtype (32 bytes).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PackageDigest(pub Vec<u8>);
+
+/// Upgrade proposal.
+#[derive(Deserialize, Debug, Clone)]
+pub struct UpgradeProposal {
+    pub digest: PackageDigest,
+    pub version: u64,
+    pub votes: VecMap<Address, UpgradeVote>,
+}
+
+/// UpgradeCap object.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+pub struct UpgradeCap {
+    pub id: UidStruct,
+    pub package: Address,
+    pub version: u64,
+    pub policy: u8,
+}
+
+/// UpgradeManager object.
+#[derive(Deserialize, Debug)]
+pub struct UpgradeManager {
+    pub id: UidStruct,
+    pub cap: UpgradeCap,
+    pub upgrade_proposal: Option<UpgradeProposal>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UidStruct {
+    pub id: Address,
+}

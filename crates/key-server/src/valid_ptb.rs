@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::errors::InternalError;
 use crate::return_err;
-use crate::KeyId;
 use crypto::create_full_id;
 use fastcrypto::encoding::{Base64, Encoding};
-use sui_sdk::types::transaction::{Argument, CallArg, Command, ProgrammableTransaction};
+use seal_sdk::types::KeyId;
 use sui_types::base_types::ObjectID;
 use sui_types::transaction::ProgrammableMoveCall;
+use sui_types::transaction::{Argument, CallArg, Command, ProgrammableTransaction};
 use tracing::debug;
 
 ///
@@ -64,6 +64,17 @@ impl TryFrom<ProgrammableTransaction> for ValidPtb {
                     cmd
                 );
             };
+
+            // Restriction: Neither results from other commands nor GasCoins are not allowed as inputs
+            for arg in &cmd.arguments {
+                if !matches!(arg, Argument::Input(_)) {
+                    return_err!(
+                        InternalError::InvalidPTB("Only pure inputs are allowed".to_string()),
+                        "Invalid argument {:?}",
+                        arg
+                    );
+                }
+            }
 
             // Restriction: The first argument to the move call must be a non-empty id.
             let _ = get_key_id(&ptb, cmd)?;
@@ -160,8 +171,8 @@ impl ValidPtb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sui_sdk::types::base_types::SuiAddress;
     use sui_types::base_types::ObjectID;
+    use sui_types::base_types::SuiAddress;
     use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
     use sui_types::Identifier;
 

@@ -5,26 +5,23 @@ use crate::cache::default_lru_cache;
 use crate::errors::InternalError;
 use crate::key_server_options::KeyServerOptions;
 use crate::mvr_forward_resolution;
-use crate::sui_rpc_client::RpcResult;
-use crate::sui_rpc_client::SuiRpcClient;
+use key_server::sui_rpc_client::{RpcResult, SuiRpcClient};
 use moka::sync::Cache;
 use once_cell::sync::Lazy;
-use sui_sdk::rpc_types::{SuiData, SuiObjectDataOptions};
 use sui_types::base_types::ObjectID;
 use tap::TapFallible;
 use tracing::{debug, warn};
 
-static CACHE: Lazy<Cache<ObjectID, ObjectID>> = Lazy::new(default_lru_cache);
 static MVR_CACHE: Lazy<Cache<String, ObjectID>> = Lazy::new(default_lru_cache);
 
 #[cfg(test)]
 pub(crate) fn add_package(pkg_id: ObjectID) {
-    CACHE.insert(pkg_id, pkg_id);
+    crate::common::PACKAGE_ID_CACHE.insert(pkg_id, pkg_id);
 }
 
 #[cfg(test)]
 pub(crate) fn add_upgraded_package(pkg_id: ObjectID, new_pkg_id: ObjectID) {
-    CACHE.insert(new_pkg_id, pkg_id);
+    crate::common::PACKAGE_ID_CACHE.insert(new_pkg_id, pkg_id);
 }
 
 pub(crate) async fn check_mvr_package_id(
@@ -63,37 +60,6 @@ pub(crate) async fn check_mvr_package_id(
     Ok(())
 }
 
-pub(crate) async fn fetch_first_pkg_id(
-    pkg_id: &ObjectID,
-    sui_rpc_client: &SuiRpcClient,
-) -> Result<ObjectID, InternalError> {
-    match CACHE.get(pkg_id) {
-        Some(first) => Ok(first),
-        None => {
-            let object = sui_rpc_client
-                .get_object_with_options(*pkg_id, SuiObjectDataOptions::default().with_bcs())
-                .await
-                .map_err(|_| InternalError::Failure("FN failed to respond".to_string()))? // internal error that fullnode fails to respond, check fullnode.
-                .into_object()
-                .map_err(|_| InternalError::InvalidPackage)?; // user error that object does not exist or deleted.
-
-            let package = object
-                .bcs
-                .ok_or(InternalError::Failure(
-                    "No BCS object in response".to_string(),
-                ))? // internal error that fullnode does not respond with bcs even though request includes the bcs option.
-                .try_as_package()
-                .ok_or(InternalError::InvalidPackage)?
-                .to_move_package(u64::MAX)
-                .map_err(|_| InternalError::InvalidPackage)?; // user error if the provided package throw MovePackageTooBig.
-
-            let first = package.original_package_id();
-            CACHE.insert(*pkg_id, first);
-            Ok(first)
-        }
-    }
-}
-
 pub(crate) fn insert_mvr_cache(mvr_name: &str, package_id: ObjectID) {
     MVR_CACHE.insert(mvr_name.to_string(), package_id);
 }
@@ -110,14 +76,14 @@ pub(crate) async fn get_reference_gas_price(sui_rpc_client: SuiRpcClient) -> Rpc
 
 #[cfg(test)]
 mod tests {
-    use crate::externals::fetch_first_pkg_id;
-    use crate::key_server_options::RetryConfig;
-    use crate::sui_rpc_client::SuiRpcClient;
+    use crate::common::fetch_first_pkg_id;
     use crate::types::Network;
     use crate::InternalError;
     use fastcrypto::ed25519::Ed25519KeyPair;
     use fastcrypto::secp256k1::Secp256k1KeyPair;
     use fastcrypto::secp256r1::Secp256r1KeyPair;
+    use key_server::sui_rpc_client::RetryConfig;
+    use key_server::sui_rpc_client::SuiRpcClient;
     use shared_crypto::intent::{Intent, IntentMessage, PersonalMessage};
     use std::str::FromStr;
     use sui_rpc::client::Client as SuiGrpcClient;
@@ -144,7 +110,7 @@ mod tests {
             RetryConfig::default(),
             None,
         );
-        match fetch_first_pkg_id(&address, &sui_rpc_client).await {
+        match fetch_first_pkg_id(&sui_rpc_client, &address).await {
             Ok(first) => {
                 assert_eq!(
                     first.to_hex_literal(),
@@ -172,7 +138,7 @@ mod tests {
             RetryConfig::default(),
             None,
         );
-        let result = fetch_first_pkg_id(&invalid_address, &sui_rpc_client).await;
+        let result = fetch_first_pkg_id(&sui_rpc_client, &invalid_address).await;
         assert!(matches!(result, Err(InternalError::InvalidPackage)));
     }
 

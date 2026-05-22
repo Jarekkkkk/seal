@@ -2,13 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[test_only]
-#[allow(unused_mut_ref, unused_variable, dead_code)]
 module seal_committee::seal_committee_tests;
 
-use seal_committee::seal_committee::{Self, Committee, propose_for_rotation, init_rotation};
-use seal_testnet::key_server::KeyServer;
+use seal::key_server::KeyServer;
+use seal_committee::seal_committee::{
+    Self,
+    Committee,
+    propose_for_rotation,
+    init_rotation,
+    test_init_committee,
+    test_attach_upgrade_manager,
+    approve_digest_for_upgrade,
+    reject_digest_for_upgrade,
+    authorize_upgrade,
+    commit_upgrade,
+    reset_proposal
+};
 use std::string;
-use sui::{bls12381::{g1_generator, g2_generator}, test_scenario::{Self, Scenario}};
+use sui::{bls12381::{g1_generator, g2_generator}, package, test_scenario::{Self, Scenario}};
 
 const ALICE: address = @0x0;
 const BOB: address = @0x1;
@@ -17,16 +28,17 @@ const DAVE: address = @0x3;
 const EVE: address = @0x4;
 
 #[test]
-fun test_scenario_2of3_to_3of4_to_1of3() {
+fun test_scenario_2of3_to_3of4_to_2of3() {
     test_tx!(|scenario| {
         // Create initial 2-of-3 committee.
-        seal_committee::init_committee(2, vector[ALICE, BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[ALICE, BOB, CHARLIE], scenario.ctx());
 
         // Register all 3 members.
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        register_member!(scenario, ALICE, g2_bytes, g2_bytes, b"https://url0.com");
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"https://url1.com");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"https://url2.com");
+        register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"https://url1.com");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"https://url2.com");
 
         // Assuming DKG is completed, all members propose with correct partial keys and master pk.
         let g2_gen = g2_generator();
@@ -55,12 +67,19 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
         let committee = scenario.take_shared_by_id<Committee>(old_committee_id);
         let key_server = committee.borrow_key_server();
 
-        assert_key_server_version!(key_server, 0);
+        assert_key_server_version_and_threshold!(key_server, 0, 2);
 
         // Verify partial key servers (ALICE=party0, BOB=party1, CHARLIE=party2).
-        assert_partial_key_server!(key_server, ALICE, b"https://url0.com", g2_bytes, 0);
-        assert_partial_key_server!(key_server, BOB, b"https://url1.com", g2_bytes, 1);
-        assert_partial_key_server!(key_server, CHARLIE, b"https://url2.com", g2_bytes, 2);
+        assert_partial_key_server!(key_server, b"https://url0.com", g2_bytes, 0);
+        assert_partial_key_server!(key_server, b"https://url1.com", g2_bytes, 1);
+        assert_partial_key_server!(key_server, b"https://url2.com", g2_bytes, 2);
+        test_scenario::return_shared(committee);
+
+        // Create upgrade manager for the first committee before rotation.
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared_by_id<Committee>(old_committee_id);
+        let upgrade_cap = package::test_publish(object::id_from_address(@0x1), scenario.ctx());
+        test_attach_upgrade_manager(&mut committee, upgrade_cap, scenario.ctx());
         test_scenario::return_shared(committee);
 
         // Initialize rotation from old committee (2-of-3): A, B, C to new committee (3-of-4): B, A, D, E.
@@ -91,7 +110,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             ALICE,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url0.com",
         );
@@ -99,7 +118,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             BOB,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url1.com",
         );
@@ -107,7 +126,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             DAVE,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url3.com",
         );
@@ -115,7 +134,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             EVE,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url4.com",
         );
@@ -164,14 +183,39 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
         let new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
         let key_server = new_committee.borrow_key_server();
 
-        // Version incremented to 1.
-        assert_key_server_version!(key_server, 1);
+        // Version incremented to 1, threshold updated to 3.
+        assert_key_server_version_and_threshold!(key_server, 1, 3);
 
         // Verify each member's URL, partial PK, and party ID (BOB=party0, ALICE=party1, DAVE=party2, EVE=party3).
-        assert_partial_key_server!(key_server, BOB, b"https://new_url1.com", g2_bytes, 0);
-        assert_partial_key_server!(key_server, ALICE, b"https://new_url0.com", g2_bytes, 1);
-        assert_partial_key_server!(key_server, DAVE, b"https://new_url3.com", g2_bytes, 2);
-        assert_partial_key_server!(key_server, EVE, b"https://new_url4.com", g2_bytes, 3);
+        assert_partial_key_server!(key_server, b"https://new_url1.com", g2_bytes, 0);
+        assert_partial_key_server!(key_server, b"https://new_url0.com", g2_bytes, 1);
+        assert_partial_key_server!(key_server, b"https://new_url3.com", g2_bytes, 2);
+        assert_partial_key_server!(key_server, b"https://new_url4.com", g2_bytes, 3);
+        test_scenario::return_shared(new_committee);
+
+        // Verify UpgradeManager was transferred to new committee by voting on an upgrade.
+        scenario.next_tx(BOB);
+        let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
+        let digest = test_digest(scenario.ctx());
+        approve_digest_for_upgrade(&mut new_committee, digest, scenario.ctx());
+        test_scenario::return_shared(new_committee);
+
+        scenario.next_tx(ALICE);
+        let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
+        approve_digest_for_upgrade(&mut new_committee, digest, scenario.ctx());
+        test_scenario::return_shared(new_committee);
+
+        scenario.next_tx(DAVE);
+        let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
+        approve_digest_for_upgrade(&mut new_committee, digest, scenario.ctx());
+        test_scenario::return_shared(new_committee);
+
+        // Authorize the upgrade to verify UpgradeManager is functional.
+        scenario.next_tx(BOB);
+        let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
+        let ticket = authorize_upgrade(&mut new_committee, scenario.ctx());
+        let receipt = package::test_upgrade(ticket);
+        commit_upgrade(&mut new_committee, receipt, scenario.ctx());
         test_scenario::return_shared(new_committee);
 
         // BOB updates URL.
@@ -183,11 +227,11 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
         );
         test_scenario::return_shared(new_committee);
 
-        // Initialize rotation to 1-of-3 committee with shuffled order: EVE, ALICE, and BOB.
+        // Initialize rotation to 2-of-3 committee with shuffled order: EVE, ALICE, and BOB.
         scenario.next_tx(BOB);
         let second_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
         second_committee.init_rotation(
-            1,
+            2,
             vector[EVE, ALICE, BOB],
             scenario.ctx(),
         );
@@ -211,7 +255,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             EVE,
             third_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://eve_url_3.com",
         );
@@ -219,7 +263,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             ALICE,
             third_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://alice_url_3.com",
         );
@@ -227,7 +271,7 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
             scenario,
             BOB,
             third_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://bob_url_3.com",
         );
@@ -277,13 +321,13 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
         let third_committee = scenario.take_shared_by_id<Committee>(third_committee_id);
         let key_server = third_committee.borrow_key_server();
 
-        // Version incremented to 2.
-        assert_key_server_version!(key_server, 2);
+        // Version incremented to 2, threshold updated to 2.
+        assert_key_server_version_and_threshold!(key_server, 2, 2);
 
         // Verify all members' URLs, partial PKs, and party IDs (EVE=party0, ALICE=party1, BOB=party2).
-        assert_partial_key_server!(key_server, EVE, b"https://eve_url_3.com", g2_bytes, 0);
-        assert_partial_key_server!(key_server, ALICE, b"https://alice_url_3.com", g2_bytes, 1);
-        assert_partial_key_server!(key_server, BOB, b"https://bob_url_3.com", g2_bytes, 2);
+        assert_partial_key_server!(key_server, b"https://eve_url_3.com", g2_bytes, 0);
+        assert_partial_key_server!(key_server, b"https://alice_url_3.com", g2_bytes, 1);
+        assert_partial_key_server!(key_server, b"https://bob_url_3.com", g2_bytes, 2);
         test_scenario::return_shared(third_committee);
     });
 }
@@ -291,46 +335,73 @@ fun test_scenario_2of3_to_3of4_to_1of3() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidThreshold)]
 fun test_init_committee_with_zero_threshold() {
     test_tx!(|scenario| {
-        seal_committee::init_committee(0, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(0, vector[BOB, CHARLIE], scenario.ctx());
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::EInvalidThreshold)]
+fun test_init_committee_with_one_threshold() {
+    test_tx!(|scenario| {
+        test_init_committee(1, vector[BOB, CHARLIE], scenario.ctx());
     });
 }
 
 #[test, expected_failure(abort_code = seal_committee::EInvalidThreshold)]
 fun test_init_committee_with_threshold_exceeding_members() {
     test_tx!(|scenario| {
-        seal_committee::init_committee(3, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(3, vector[BOB, CHARLIE], scenario.ctx());
     });
 }
 
 #[test, expected_failure(abort_code = sui::vec_set::EKeyAlreadyExists)]
 fun test_init_committee_with_duplicate_members() {
     test_tx!(|scenario| {
-        seal_committee::init_committee(2, vector[BOB, BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, BOB, CHARLIE], scenario.ctx());
     });
 }
 
 #[test, expected_failure(abort_code = seal_committee::EInvalidThreshold)]
 fun test_init_committee_with_empty_members() {
     test_tx!(|scenario| {
-        seal_committee::init_committee(1, vector[], scenario.ctx());
+        test_init_committee(2, vector[], scenario.ctx());
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::EWrongUpgradeCap)]
+fun test_init_committee_with_wrong_upgrade_cap() {
+    test_tx!(|scenario| {
+        // Create an UpgradeCap with wrong package ID (using @0x1 instead of seal_committee package).
+        let wrong_upgrade_cap = package::test_publish(
+            object::id_from_address(@0x1),
+            scenario.ctx(),
+        );
+        seal_committee::init_committee(
+            wrong_upgrade_cap,
+            2,
+            vector[ALICE, BOB],
+            scenario.ctx(),
+        );
     });
 }
 
 #[test, expected_failure(abort_code = seal_committee::EInsufficientOldMembers)]
 fun test_init_rotation_fails_with_not_enough_old_members() {
     test_tx!(|scenario| {
-        // Init and finalize committee with BOB only.
+        // Init and finalize committee with BOB and CHARLIE.
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(1, vector[BOB], scenario.ctx());
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        propose_member!(scenario, BOB, vector[g2_bytes], g2_bytes);
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
+        propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes], g2_bytes);
+        propose_member!(scenario, CHARLIE, vector[g2_bytes, g2_bytes], g2_bytes);
 
         scenario.next_tx(BOB);
         let committee = scenario.take_shared<Committee>();
         // Rotate with no continuing members - fails.
         committee.init_rotation(
             2,
-            vector[CHARLIE, DAVE],
+            vector[DAVE, EVE],
             scenario.ctx(),
         );
 
@@ -341,11 +412,12 @@ fun test_init_rotation_fails_with_not_enough_old_members() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidState)]
 fun test_init_rotation_fails_with_non_finalized_old_committee() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"url2");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
         propose_member!(scenario, CHARLIE, vector[g2_bytes, g2_bytes], g2_bytes);
         scenario.next_tx(BOB);
         let committee = scenario.take_shared<Committee>();
@@ -364,12 +436,19 @@ fun test_init_rotation_fails_with_non_finalized_old_committee() {
 #[test, expected_failure(abort_code = seal_committee::ENotMember)]
 fun test_register_fails_for_non_member() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
         scenario.next_tx(DAVE);
         let mut committee = scenario.take_shared<Committee>();
-        committee.register(g2_bytes, g2_bytes, string::utf8(b"url3"), scenario.ctx());
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url3"),
+            string::utf8(b"server3"),
+            scenario.ctx(),
+        );
 
         test_scenario::return_shared(committee);
     });
@@ -378,14 +457,27 @@ fun test_register_fails_for_non_member() {
 #[test, expected_failure(abort_code = seal_committee::EAlreadyRegistered)]
 fun test_register_fails_when_already_registered() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
         scenario.next_tx(BOB);
 
         let mut committee = scenario.take_shared<Committee>();
-        committee.register(g2_bytes, g2_bytes, string::utf8(b"url1"), scenario.ctx());
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url1"),
+            string::utf8(b"server1"),
+            scenario.ctx(),
+        );
         // Register again as same member fails.
-        committee.register(g2_bytes, g2_bytes, string::utf8(b"url2"), scenario.ctx());
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url2"),
+            string::utf8(b"server2"),
+            scenario.ctx(),
+        );
 
         test_scenario::return_shared(committee);
     });
@@ -394,18 +486,57 @@ fun test_register_fails_when_already_registered() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidState)]
 fun test_register_fails_when_not_in_init_state() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(1, vector[BOB], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        propose_member!(scenario, BOB, vector[g2_bytes], g2_bytes);
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
+        propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes], g2_bytes);
 
         // Now in Finalized state.
         scenario.next_tx(BOB);
         let mut committee = scenario.take_shared<Committee>();
 
         // Try to register in Finalized state - fails.
-        committee.register(g2_bytes, g2_bytes, string::utf8(b"url2"), scenario.ctx());
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url2"),
+            string::utf8(b"server2"),
+            scenario.ctx(),
+        );
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENameAlreadyTaken)]
+fun test_register_fails_with_duplicate_name() {
+    test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
+        let g2_bytes = *g2_generator().bytes();
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+
+        scenario.next_tx(BOB);
+        let mut committee = scenario.take_shared<Committee>();
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url1"),
+            string::utf8(b"server1"),
+            scenario.ctx(),
+        );
+        test_scenario::return_shared(committee);
+
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        committee.register(
+            g1_bytes,
+            g2_bytes,
+            string::utf8(b"url2"),
+            string::utf8(b"server1"), // Same name as BOB
+            scenario.ctx(),
+        );
         test_scenario::return_shared(committee);
     });
 }
@@ -413,12 +544,13 @@ fun test_register_fails_when_not_in_init_state() {
 #[test, expected_failure(abort_code = seal_committee::ENotMember)]
 fun test_propose_fails_for_non_member() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
         // Register members.
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"url2");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
 
         // Non-member @0x3 tries to propose - fails.
         propose_member!(scenario, DAVE, vector[g2_bytes, g2_bytes], g2_bytes);
@@ -428,11 +560,12 @@ fun test_propose_fails_for_non_member() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidProposal)]
 fun test_propose_fails_with_wrong_partial_pks_count() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"url2");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
 
         // Propose with only 1 partial_pk instead of 2 - fails.
         propose_member!(scenario, CHARLIE, vector[g2_bytes], g2_bytes);
@@ -442,13 +575,14 @@ fun test_propose_fails_with_wrong_partial_pks_count() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidProposal)]
 fun test_propose_fails_with_mismatched_pk() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
         let g2_different_bytes =
             x"95a35c03681de93032e9a0544b9b8533ffd7fabe1e70b29a844030237e84789c0c34c0e5a5b12a33e345599ba90f096f17ddd3a8586a4a0de28c13e249c3767026a4bbdb4343885b50115931f8e8a77d735d269ac5a5eca05787d0b91c4a5ffb";
 
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"url2");
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
 
         propose_member!(scenario, CHARLIE, vector[g2_bytes, g2_bytes], g2_bytes);
         // BOB proposes with mismatched master pk, fails.
@@ -456,13 +590,43 @@ fun test_propose_fails_with_mismatched_pk() {
     });
 }
 
+#[test, expected_failure(abort_code = seal_committee::EInvalidProposal)]
+fun test_propose_fails_with_mismatched_messages_hash() {
+    test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
+        let g2_bytes = *g2_generator().bytes();
+
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
+
+        // CHARLIE proposes with one messages_hash.
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        committee.propose(
+            vector[g2_bytes, g2_bytes],
+            g2_bytes,
+            b"hash_from_charlie",
+            scenario.ctx(),
+        );
+        test_scenario::return_shared(committee);
+
+        // BOB proposes with a different messages_hash - fails with EInvalidProposal.
+        scenario.next_tx(BOB);
+        let mut committee = scenario.take_shared<Committee>();
+        committee.propose(vector[g2_bytes, g2_bytes], g2_bytes, b"hash_from_bob", scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
 #[test, expected_failure(abort_code = seal_committee::ENotRegistered)]
 fun test_propose_fails_when_not_all_registered() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url3");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url3");
 
         // @0x2 not registered, propose fails.
         propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes], g2_bytes);
@@ -472,11 +636,12 @@ fun test_propose_fails_when_not_all_registered() {
 #[test, expected_failure(abort_code = seal_committee::EAlreadyProposed)]
 fun test_propose_fails_on_duplicate_approval() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
 
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        register_member!(scenario, CHARLIE, g2_bytes, g2_bytes, b"url2");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
         // First proposal from CHARLIE.
         let partial_pks = vector[g2_bytes, g2_bytes];
         let pk = g2_bytes;
@@ -490,11 +655,13 @@ fun test_propose_fails_on_duplicate_approval() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidState)]
 fun test_propose_fails_committee_has_old_committee_id() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        // Create and finalize first committee (1-of-1 with BOB).
-        seal_committee::init_committee(1, vector[BOB], scenario.ctx());
-        register_member!(scenario, BOB, g2_bytes, g2_bytes, b"url1");
-        propose_member!(scenario, BOB, vector[g2_bytes], g2_bytes);
+        // Create and finalize first committee (2-of-2 with BOB and CHARLIE).
+        test_init_committee(2, vector[BOB, CHARLIE], scenario.ctx());
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"url1");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"url2");
+        propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes], g2_bytes);
 
         scenario.next_tx(BOB);
         let old_committee = scenario.take_shared<Committee>();
@@ -504,7 +671,7 @@ fun test_propose_fails_committee_has_old_committee_id() {
         // Initialize rotation committee from the old committee.
         scenario.next_tx(BOB);
         let old_committee = scenario.take_shared_by_id<Committee>(old_committee_id);
-        old_committee.init_rotation(1, vector[BOB], scenario.ctx());
+        old_committee.init_rotation(2, vector[BOB, CHARLIE], scenario.ctx());
         test_scenario::return_shared(old_committee);
 
         // Get the new committee (which has old_committee_id.is_some()).
@@ -513,14 +680,15 @@ fun test_propose_fails_committee_has_old_committee_id() {
         let new_committee_id = object::id(&new_committee);
         test_scenario::return_shared(new_committee);
 
-        // Register BOB for the new committee.
-        register_member_by_id!(scenario, BOB, new_committee_id, g2_bytes, g2_bytes, b"url1");
+        // Register BOB and CHARLIE for the new committee.
+        register_member_by_id!(scenario, BOB, new_committee_id, g1_bytes, g2_bytes, b"url1");
+        register_member_by_id!(scenario, CHARLIE, new_committee_id, g1_bytes, g2_bytes, b"url2");
 
         // Try to call propose (instead of propose_for_rotation) on rotation committee.
         // This should fail because propose is only for fresh DKG committees.
         scenario.next_tx(BOB);
         let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
-        new_committee.propose(vector[g2_bytes], g2_bytes, scenario.ctx());
+        new_committee.propose(vector[g2_bytes, g2_bytes], g2_bytes, b"test_hash", scenario.ctx());
         test_scenario::return_shared(new_committee);
     });
 }
@@ -528,12 +696,14 @@ fun test_propose_fails_committee_has_old_committee_id() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidState)]
 fun test_finalize_for_rotation_mismatched_old_committee() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        // Create first committee (1-of-1).
-        seal_committee::init_committee(1, vector[ALICE], scenario.ctx());
-        register_member!(scenario, ALICE, g2_bytes, g2_bytes, b"https://url0.com");
+        // Create first committee (2-of-2).
+        test_init_committee(2, vector[ALICE, BOB], scenario.ctx());
+        register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"https://url1.com");
 
-        let partial_pks = vector[g2_bytes];
+        let partial_pks = vector[g2_bytes, g2_bytes];
         let master_pk = g2_bytes;
         propose_member!(scenario, ALICE, partial_pks, master_pk);
 
@@ -542,10 +712,11 @@ fun test_finalize_for_rotation_mismatched_old_committee() {
         let first_committee_id = object::id(&first_committee);
         test_scenario::return_shared(first_committee);
 
-        // Create second unrelated committee (1-of-1).
-        seal_committee::init_committee(1, vector[DAVE], scenario.ctx());
-        register_member!(scenario, DAVE, g2_bytes, g2_bytes, b"https://url3.com");
-        let partial_pks2 = vector[g2_bytes];
+        // Create second unrelated committee (2-of-2).
+        test_init_committee(2, vector[DAVE, EVE], scenario.ctx());
+        register_member!(scenario, DAVE, g1_bytes, g2_bytes, b"https://url3.com");
+        register_member!(scenario, EVE, g1_bytes, g2_bytes, b"https://url4.com");
+        let partial_pks2 = vector[g2_bytes, g2_bytes];
         propose_member!(scenario, DAVE, partial_pks2, master_pk);
 
         scenario.next_tx(DAVE);
@@ -570,7 +741,7 @@ fun test_finalize_for_rotation_mismatched_old_committee() {
             scenario,
             ALICE,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url0.com",
         );
@@ -578,7 +749,7 @@ fun test_finalize_for_rotation_mismatched_old_committee() {
             scenario,
             BOB,
             new_committee_id,
-            g2_bytes,
+            g1_bytes,
             g2_bytes,
             b"https://new_url1.com",
         );
@@ -590,6 +761,7 @@ fun test_finalize_for_rotation_mismatched_old_committee() {
         let wrong_committee = scenario.take_shared_by_id<Committee>(second_committee_id);
         new_committee.propose_for_rotation(
             new_partial_pks,
+            b"test_hash",
             wrong_committee,
             scenario.ctx(),
         );
@@ -600,12 +772,14 @@ fun test_finalize_for_rotation_mismatched_old_committee() {
 #[test, expected_failure(abort_code = seal_committee::EInvalidState)]
 fun test_finalize_for_rotation_invalid_state() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        // Create first committee (1-of-1).
-        seal_committee::init_committee(1, vector[ALICE], scenario.ctx());
-        register_member!(scenario, ALICE, g2_bytes, g2_bytes, b"https://url0.com");
+        // Create first committee (2-of-2).
+        test_init_committee(2, vector[ALICE, BOB], scenario.ctx());
+        register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"https://url1.com");
 
-        let partial_pks = vector[g2_bytes];
+        let partial_pks = vector[g2_bytes, g2_bytes];
         let master_pk = g2_bytes;
         propose_member!(scenario, ALICE, partial_pks, master_pk);
 
@@ -614,10 +788,11 @@ fun test_finalize_for_rotation_invalid_state() {
         let first_committee_id = object::id(&first_committee);
         test_scenario::return_shared(first_committee);
 
-        // Create a second committee that is NOT a rotation (no old_committee_id) (1-of-1).
-        seal_committee::init_committee(1, vector[DAVE], scenario.ctx());
-        register_member!(scenario, DAVE, g2_bytes, g2_bytes, b"https://url3.com");
-        let partial_pks2 = vector[g2_bytes];
+        // Create a second committee that is NOT a rotation (no old_committee_id) (2-of-2).
+        test_init_committee(2, vector[DAVE, EVE], scenario.ctx());
+        register_member!(scenario, DAVE, g1_bytes, g2_bytes, b"https://url3.com");
+        register_member!(scenario, EVE, g1_bytes, g2_bytes, b"https://url4.com");
+        let partial_pks2 = vector[g2_bytes, g2_bytes];
         propose_member!(scenario, DAVE, partial_pks2, master_pk);
 
         scenario.next_tx(DAVE);
@@ -626,12 +801,13 @@ fun test_finalize_for_rotation_invalid_state() {
         test_scenario::return_shared(second_committee);
 
         // Try to call propose_for_rotation on second_committee, fails with EInvalidState.
-        let new_partial_pks = vector[g2_bytes];
+        let new_partial_pks = vector[g2_bytes, g2_bytes];
         scenario.next_tx(DAVE);
         let mut second_committee = scenario.take_shared_by_id<Committee>(second_committee_id);
         let first_committee = scenario.take_shared_by_id<Committee>(first_committee_id);
         second_committee.propose_for_rotation(
             new_partial_pks,
+            b"test_hash",
             first_committee,
             scenario.ctx(),
         );
@@ -642,10 +818,12 @@ fun test_finalize_for_rotation_invalid_state() {
 #[test, expected_failure(abort_code = seal_committee::ENotMember)]
 fun test_update_url_fails_for_non_member() {
     test_tx!(|scenario| {
+        let g1_bytes = *g1_generator().bytes();
         let g2_bytes = *g2_generator().bytes();
-        seal_committee::init_committee(1, vector[ALICE], scenario.ctx());
-        register_member!(scenario, ALICE, g2_bytes, g2_bytes, b"https://url0.com");
-        propose_member!(scenario, ALICE, vector[g2_bytes], g2_bytes);
+        test_init_committee(2, vector[ALICE, CHARLIE], scenario.ctx());
+        register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"https://url2.com");
+        propose_member!(scenario, ALICE, vector[g2_bytes, g2_bytes], g2_bytes);
 
         scenario.next_tx(ALICE);
         let committee = scenario.take_shared<Committee>();
@@ -687,10 +865,16 @@ public macro fun register_member(
     let enc_pk = $enc_pk;
     let signing_pk = $signing_pk;
     let url = $url;
-
     scenario.next_tx(member);
     let mut committee = scenario.take_shared<Committee>();
-    committee.register(enc_pk, signing_pk, string::utf8(url), scenario.ctx());
+    let name = member.to_string();
+    committee.register(
+        enc_pk,
+        signing_pk,
+        string::utf8(url),
+        name,
+        scenario.ctx(),
+    );
     test_scenario::return_shared(committee);
 }
 
@@ -712,7 +896,14 @@ public macro fun register_member_by_id(
 
     scenario.next_tx(member);
     let mut committee = scenario.take_shared_by_id<Committee>(committee_id);
-    committee.register(enc_pk, signing_pk, string::utf8(url), scenario.ctx());
+    let name = member.to_string();
+    committee.register(
+        enc_pk,
+        signing_pk,
+        string::utf8(url),
+        name,
+        scenario.ctx(),
+    );
     test_scenario::return_shared(committee);
 }
 
@@ -730,7 +921,7 @@ public macro fun propose_member(
 
     scenario.next_tx(member);
     let mut committee = scenario.take_shared<Committee>();
-    committee.propose(partial_pks, pk, scenario.ctx());
+    committee.propose(partial_pks, pk, b"test_hash", scenario.ctx());
     test_scenario::return_shared(committee);
 }
 
@@ -751,25 +942,23 @@ public macro fun propose_for_rotation_member(
     scenario.next_tx(member);
     let mut new_committee = scenario.take_shared_by_id<Committee>(new_committee_id);
     let old_committee = scenario.take_shared_by_id<Committee>(old_committee_id);
-    new_committee.propose_for_rotation(partial_pks, old_committee, scenario.ctx());
+    new_committee.propose_for_rotation(partial_pks, b"test_hash", old_committee, scenario.ctx());
     test_scenario::return_shared(new_committee);
 }
 
 /// Helper macro to assert partial key server URL, partial PK, and party ID.
 public macro fun assert_partial_key_server(
     $key_server: &KeyServer,
-    $member: address,
     $expected_url: vector<u8>,
     $expected_partial_pk: vector<u8>,
     $expected_party_id: u16,
 ) {
     let key_server = $key_server;
-    let member = $member;
     let expected_url = $expected_url;
     let expected_partial_pk = $expected_partial_pk;
     let expected_party_id = $expected_party_id;
 
-    let partial_ks = key_server.partial_key_server_for_member(member);
+    let partial_ks = key_server.partial_key_server_for_party(expected_party_id);
     assert!(partial_ks.partial_ks_url() == string::utf8(expected_url));
     assert!(partial_ks.partial_ks_pk() == expected_partial_pk);
     assert!(partial_ks.partial_ks_party_id() == expected_party_id);
@@ -781,4 +970,234 @@ public macro fun assert_key_server_version($key_server: &KeyServer, $expected_ve
     let expected_version = $expected_version;
 
     assert!(key_server.committee_version() == expected_version);
+}
+
+/// Helper macro to assert key server version and threshold.
+public macro fun assert_key_server_version_and_threshold(
+    $key_server: &KeyServer,
+    $expected_version: u32,
+    $expected_threshold: u16,
+) {
+    let key_server = $key_server;
+    let expected_version = $expected_version;
+    let expected_threshold = $expected_threshold;
+
+    let (version, threshold) = key_server.committee_version_and_threshold();
+    assert!(version == expected_version);
+    assert!(threshold == expected_threshold);
+}
+
+/// Helper macro to setup and finalize a 2-of-2 committee with ALICE and BOB, including UpgradeManager.
+public macro fun setup_2_of_2_committee($scenario: &mut Scenario) {
+    let scenario = $scenario;
+    let g1_bytes = *g1_generator().bytes();
+    let g2_bytes = *g2_generator().bytes();
+    test_init_committee(2, vector[ALICE, BOB], scenario.ctx());
+    register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+    register_member!(scenario, BOB, g1_bytes, g2_bytes, b"https://url1.com");
+    propose_member!(scenario, ALICE, vector[g2_bytes, g2_bytes], g2_bytes);
+    propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes], g2_bytes);
+
+    scenario.next_tx(ALICE);
+    let mut committee = scenario.take_shared<Committee>();
+    let upgrade_cap = package::test_publish(object::id_from_address(@0x1), scenario.ctx());
+    test_attach_upgrade_manager(&mut committee, upgrade_cap, scenario.ctx());
+    test_scenario::return_shared(committee);
+}
+
+// ===== Upgrade Tests =====
+
+/// Generate a test digest (32 bytes)
+fun test_digest(ctx: &mut TxContext): vector<u8> {
+    ctx.fresh_object_address().to_bytes()
+}
+
+#[test]
+fun test_package_upgrade_e2e() {
+    test_tx!(|scenario| {
+        // Create and finalize a 2-of-3 committee.
+        let g1_bytes = *g1_generator().bytes();
+        let g2_bytes = *g2_generator().bytes();
+        test_init_committee(2, vector[ALICE, BOB, CHARLIE], scenario.ctx());
+        register_member!(scenario, ALICE, g1_bytes, g2_bytes, b"https://url0.com");
+        register_member!(scenario, BOB, g1_bytes, g2_bytes, b"https://url1.com");
+        register_member!(scenario, CHARLIE, g1_bytes, g2_bytes, b"https://url2.com");
+        propose_member!(scenario, ALICE, vector[g2_bytes, g2_bytes, g2_bytes], g2_bytes);
+        propose_member!(scenario, BOB, vector[g2_bytes, g2_bytes, g2_bytes], g2_bytes);
+        propose_member!(scenario, CHARLIE, vector[g2_bytes, g2_bytes, g2_bytes], g2_bytes);
+
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+
+        // Create an upgrade cap for testing
+        let upgrade_cap = package::test_publish(object::id_from_address(@0x1), scenario.ctx());
+
+        // Create upgrade manager
+        test_attach_upgrade_manager(&mut committee, upgrade_cap, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // ALICE proposes bad digest by voting approve
+        let bad_digest = test_digest(scenario.ctx());
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, bad_digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // BOB votes to reject
+        scenario.next_tx(BOB);
+        let mut committee = scenario.take_shared<Committee>();
+        reject_digest_for_upgrade(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // CHARLIE votes to reject
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        reject_digest_for_upgrade(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Reset the proposal (>= threshold rejections)
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        reset_proposal(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Now BOB votes approve
+        let good_digest = test_digest(scenario.ctx());
+        scenario.next_tx(BOB);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, good_digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // CHARLIE votes reject
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        reject_digest_for_upgrade(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // CHARLIE updates to approve
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, good_digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Authorize and commit the good upgrade
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        let ticket = authorize_upgrade(&mut committee, scenario.ctx());
+        let receipt = package::test_upgrade(ticket);
+        commit_upgrade(&mut committee, receipt, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENotAuthorized)]
+fun test_upgrade_vote_fails_for_non_member() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // CHARLIE (non-member) tries to vote - should fail
+        let digest = test_digest(scenario.ctx());
+        scenario.next_tx(CHARLIE);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENoProposalForDigest)]
+fun test_upgrade_vote_fails_with_wrong_digest() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // ALICE votes for digest1
+        let digest1 = test_digest(scenario.ctx());
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, digest1, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // BOB tries to vote for digest2 - should fail
+        let digest2 = test_digest(scenario.ctx());
+        scenario.next_tx(BOB);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, digest2, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENotEnoughVotes)]
+fun test_authorize_upgrade_fails_without_threshold_approvals() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // Only 1 approval (ALICE), but threshold is 2.
+        let digest = test_digest(scenario.ctx());
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        approve_digest_for_upgrade(&mut committee, digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Try to authorize with only 1 approval - fails.
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        let ticket = authorize_upgrade(&mut committee, scenario.ctx());
+        let receipt = package::test_upgrade(ticket);
+        commit_upgrade(&mut committee, receipt, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENotEnoughVotes)]
+fun test_reset_proposal_fails_without_threshold_rejections() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // Only 1 rejection (ALICE), but threshold is 2.
+        let digest = test_digest(scenario.ctx());
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        // First create a proposal by approving
+        approve_digest_for_upgrade(&mut committee, digest, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Now ALICE rejects
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        reject_digest_for_upgrade(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+
+        // Try to reset with only 1 rejection - fails.
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        reset_proposal(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENoProposalForDigest)]
+fun test_authorize_upgrade_fails_when_no_proposal_exists() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // Try to authorize without any proposal - fails.
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        let ticket = authorize_upgrade(&mut committee, scenario.ctx());
+        let receipt = package::test_upgrade(ticket);
+        commit_upgrade(&mut committee, receipt, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
+}
+
+#[test, expected_failure(abort_code = seal_committee::ENoProposalForDigest)]
+fun test_reset_proposal_fails_when_no_proposal_exists() {
+    test_tx!(|scenario| {
+        setup_2_of_2_committee!(scenario);
+
+        // Try to reset without any proposal - fails.
+        scenario.next_tx(ALICE);
+        let mut committee = scenario.take_shared<Committee>();
+        reset_proposal(&mut committee, scenario.ctx());
+        test_scenario::return_shared(committee);
+    });
 }

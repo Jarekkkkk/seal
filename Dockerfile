@@ -1,12 +1,12 @@
 # Start with a Rust base image
-FROM rust:1.88-bullseye  AS builder
+FROM rust:1.90-bullseye  AS builder
 
 ARG PROFILE=release
 
 WORKDIR work
 
 COPY ./crates ./crates
-COPY ./Cargo.toml ./
+COPY ./Cargo.toml ./Cargo.lock ./
 
 ARG GIT_REVISION
 ENV GIT_REVISION=$GIT_REVISION

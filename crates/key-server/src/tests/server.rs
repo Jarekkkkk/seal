@@ -1,40 +1,28 @@
 // Copyright (c), Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use fastcrypto::groups::bls12381::G2Element;
-use fastcrypto::groups::GroupElement;
 use prometheus::Registry;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use tracing_test::traced_test;
 
-use crate::key_server_options::{CommitteeState, ServerMode};
-use crate::master_keys::MasterKeys;
-use crate::metrics::Metrics;
+use crate::metrics::KeyServerMetrics;
 use crate::start_server_background_tasks;
 use crate::tests::SealTestCluster;
 
+use crate::common::{HEADER_CLIENT_SDK_TYPE, HEADER_CLIENT_SDK_VERSION, SDK_TYPE_AGGREGATOR};
 use crate::errors::InternalError::Failure;
 use crate::signed_message::signed_request;
 use crate::tests::externals::get_key;
-use crate::tests::test_utils::{
-    build_partial_key_servers, create_committee_key_server_onchain, create_test_server,
-    execute_programmable_transaction,
-};
 use crate::tests::whitelist::{add_user_to_whitelist, create_whitelist, whitelist_create_ptb};
 use crate::{app, time, Certificate, DefaultEncoding, FetchKeyRequest};
 use axum::body::Body;
 use axum::extract::Request;
+use crypto::elgamal;
 use crypto::ibe::generate_key_pair;
-use crypto::ibe::{self, MasterKey, ProofOfPossession};
-use crypto::{elgamal, DST_POP};
+use crypto::ibe::{self};
 use fastcrypto::ed25519::Ed25519KeyPair;
 use fastcrypto::ed25519::Ed25519PrivateKey;
-use fastcrypto::encoding::{Base64, Encoding, Hex};
-use fastcrypto::error::FastCryptoError::InvalidInput;
-use fastcrypto::error::FastCryptoResult;
-use fastcrypto::groups::{bls12381::G1Element, HashToGroupElement, Pairing};
+use fastcrypto::encoding::{Base64, Encoding};
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::KeyPair;
 use fastcrypto::traits::Signer;
@@ -51,8 +39,6 @@ use shared_crypto::intent::Intent;
 use shared_crypto::intent::IntentMessage;
 use std::str::FromStr;
 use std::time::Duration;
-use sui_rpc::client::Client as SuiGrpcClient;
-use sui_sdk_types::Address;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::crypto::Signature;
 use sui_types::signature::GenericSignature;
@@ -84,7 +70,7 @@ async fn test_server_background_task_monitor() {
     tc.add_open_server(seal_package).await;
 
     let metrics_registry = Registry::default();
-    let metrics = Arc::new(Metrics::new(&metrics_registry));
+    let metrics = Arc::new(KeyServerMetrics::new(&metrics_registry));
 
     let (reference_gas_price_receiver, monitor_handle) = start_server_background_tasks(
         Arc::new(tc.server().clone()),
@@ -134,13 +120,86 @@ async fn test_service() {
         let response = client
             .request(
                 Request::builder()
-                    .uri(format!("http://{addr}/v1/service"))
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, "typescript")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), 400);
+        let error_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let error_json: Value = from_slice(&error_bytes).unwrap();
+        assert_eq!(
+            error_json.get("error").unwrap().as_str().unwrap(),
+            "MissingRequiredHeader"
+        );
+
+        // Old client SDK version. Should fail with 426 Upgrade Required
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, "typescript")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.3.0") // Too old (requires >=0.4.6)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 426); // Upgrade Required
+        let error_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let error_json: Value = from_slice(&error_bytes).unwrap();
+        assert_eq!(
+            error_json.get("error").unwrap().as_str().unwrap(),
+            "DeprecatedSDKVersion"
+        );
+
+        // Old aggregator version. Should fail with 426 Upgrade Required
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, SDK_TYPE_AGGREGATOR)
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.5.14") // Too old (requires >=0.6.2)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 426); // Upgrade Required
+        let error_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let error_json: Value = from_slice(&error_bytes).unwrap();
+        assert_eq!(
+            error_json.get("error").unwrap().as_str().unwrap(),
+            "DeprecatedSDKVersion"
+        );
+
+        // Valid aggregator SDK version.
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, SDK_TYPE_AGGREGATOR)
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.6.2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
 
         // Valid request
         let response = client
@@ -150,7 +209,8 @@ async fn test_service() {
                         "http://{addr}/v1/service?service_id={}",
                         key_server_object_id.as_str()
                     ))
-                    .header("Client-Sdk-Version", "0.4.11")
+                    .header(HEADER_CLIENT_SDK_TYPE, "typescript")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -170,12 +230,63 @@ async fn test_service() {
             &key_server_object_id
         );
 
+        // Missing Client-Sdk-Type. Key server keeps accepting this as long as
+        // Client-Sdk-Version is present and valid.
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+
+        // Unknown Client-Sdk-Type. Key server ignores unknown SDK types.
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, "python")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+
+        // Valid Rust SDK request.
+        let response = client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{addr}/v1/service?service_id={}",
+                        key_server_object_id.as_str()
+                    ))
+                    .header(HEADER_CLIENT_SDK_TYPE, "rust")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+
         // If the service_id query param is NOT set, return error
         let response = client
             .request(
                 Request::builder()
                     .uri(format!("http://{addr}/v1/service"))
-                    .header("Client-Sdk-Version", "0.4.11")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -192,7 +303,7 @@ async fn test_service() {
                         "http://{addr}/v1/service?service_id={}",
                         key_server_object_id.as_str()
                     ))
-                    .header("Client-Sdk-Version", "0.4.11")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
                     .body(Body::from(large_body))
                     .unwrap(),
             )
@@ -297,7 +408,8 @@ async fn test_fetch_key() {
                 Request::builder()
                     .uri(format!("http://{addr}/v1/fetch_key",))
                     .method("POST")
-                    .header("Client-Sdk-Version", "0.4.11")
+                    .header(HEADER_CLIENT_SDK_TYPE, "typescript")
+                    .header(HEADER_CLIENT_SDK_VERSION, "0.4.11")
                     .header("Content-Type", "application/json")
                     .body(Body::from(json!(request).to_string()))
                     .unwrap(),
@@ -328,154 +440,6 @@ async fn test_fetch_key() {
     .await;
 }
 
-#[tokio::test]
-async fn test_committee_server_hot_reload_and_verify_pop() {
-    let tc = SealTestCluster::new(0, "seal_testnet").await;
-    let (seal_package, _) = tc.publish("seal").await;
-    let (package_id, _) = tc.registry;
-
-    // Test data for master share before rotation, party 0.
-    let master_share_0_bytes =
-        Hex::decode("0x2c8e06a3ba09ff64b841d39df9534e35cee33605033003a634fe6ca2a90c216d").unwrap();
-    let master_share_0 =
-        MasterKey::from_byte_array(master_share_0_bytes.as_slice().try_into().unwrap()).unwrap();
-    let partial_pk_0 = ibe::public_key_from_master_key(&master_share_0);
-    let party_id_0 = 0;
-
-    // New master share after rotation, party 0 becomes party 1.
-    let master_share_1_bytes =
-        Hex::decode("0x03899294f5e6551631fcbaea5583367fb565471adeccb220b769879c55e66ed9").unwrap();
-    let master_share_1 =
-        MasterKey::from_byte_array(master_share_1_bytes.as_slice().try_into().unwrap()).unwrap();
-    let partial_pk_1 = ibe::public_key_from_master_key(&master_share_1);
-    let party_id_1 = 1;
-
-    let master_pk = G2Element::zero();
-    let member_address = tc.test_cluster().get_address_0();
-
-    // Create on-chain a committee mode KeyServer with one partial key server (party_id_0, partial_pk_0).
-    let key_server_id = create_committee_key_server_onchain(
-        tc.test_cluster(),
-        package_id,
-        member_address,
-        &partial_pk_0,
-        party_id_0,
-        &master_pk,
-        1, // threshold
-    )
-    .await;
-
-    // Get object version and digest for later update.
-    let key_server_obj = tc
-        .test_cluster()
-        .sui_client()
-        .read_api()
-        .get_object_with_options(
-            key_server_id,
-            sui_sdk::rpc_types::SuiObjectDataOptions::default(),
-        )
-        .await
-        .unwrap();
-    let key_server_version = key_server_obj.data.as_ref().unwrap().version;
-    let key_server_digest = key_server_obj.data.as_ref().unwrap().digest;
-
-    // Initialize a server with the ks object id, rotation mode (current=0, target=1), and v0 and v1 master shares.
-    let server = create_test_server(
-        tc.test_cluster().sui_client().clone(),
-        SuiGrpcClient::new(&tc.test_cluster().fullnode_handle.rpc_url).unwrap(),
-        seal_package,
-        ServerMode::Committee {
-            member_address: Address::new(member_address.to_inner()),
-            key_server_obj_id: Address::new(key_server_id.into_bytes()),
-            committee_state: CommitteeState::Rotation { target_version: 1 },
-        },
-        Some(0), // onchain_version starts at 0
-        [
-            ("MASTER_SHARE_V0", master_share_0_bytes.as_slice()),
-            ("MASTER_SHARE_V1", master_share_1_bytes.as_slice()),
-        ],
-    )
-    .await;
-
-    // Extract current_version pointer.
-    let current_version: Arc<AtomicU32> = if let MasterKeys::Committee {
-        committee_version, ..
-    } = &server.master_keys
-    {
-        Arc::clone(committee_version)
-    } else {
-        panic!("Expected Committee master keys");
-    };
-
-    // Current version is 0.
-    assert_eq!(current_version.load(Ordering::Relaxed), 0);
-
-    // Update partial key servers on-chain to new partial key server (party_id_1, partial_pk_1).
-    let mut builder = ProgrammableTransactionBuilder::new();
-    let partial_key_servers = build_partial_key_servers(
-        &mut builder,
-        package_id,
-        member_address,
-        &partial_pk_1,
-        party_id_1,
-    );
-
-    let key_server_obj = builder
-        .obj(sui_types::transaction::ObjectArg::ImmOrOwnedObject((
-            key_server_id,
-            key_server_version,
-            key_server_digest,
-        )))
-        .unwrap();
-
-    builder.programmable_move_call(
-        package_id,
-        sui_types::Identifier::new("key_server").unwrap(),
-        sui_types::Identifier::new("update_partial_key_servers").unwrap(),
-        vec![],
-        vec![key_server_obj, partial_key_servers],
-    );
-    execute_programmable_transaction(&tc, member_address, builder.finish()).await;
-
-    // Refresh server.
-    server.refresh_committee_server().await;
-
-    // Verify PoP for new partial key server (party_id_1, partial_pk_1).
-    let pop_map = server.key_server_oid_to_pop.read().unwrap();
-    let pop = pop_map.get(&key_server_id).unwrap();
-    assert!(verify_pop(pop, &key_server_id, party_id_1, &partial_pk_1).is_ok());
-
-    // Current version updated to 1 after refresh.
-    assert_eq!(current_version.load(Ordering::Relaxed), 1);
-}
-
-/// Verify that a proof-of-possession is valid for a given public key, key server object ID, and party ID.
-pub fn verify_pop(
-    pop: &ProofOfPossession,
-    key_server_obj_id: &ObjectID,
-    party_id: u16,
-    public_key: &G2Element,
-) -> FastCryptoResult<()> {
-    // Construct the PoP message: key_server_obj_id || party_id
-    let mut pop_message = Vec::new();
-    pop_message.extend_from_slice(key_server_obj_id.as_ref());
-    pop_message.extend_from_slice(&party_id.to_le_bytes());
-
-    // Reconstruct the full message that was signed
-    let mut full_msg = DST_POP.to_vec();
-    full_msg.extend(bcs::to_bytes(public_key).map_err(|_| InvalidInput)?);
-    full_msg.extend(pop_message);
-
-    // Verify pairing.
-    if pop.pairing(&G2Element::generator())
-        == G1Element::hash_to_group_element(&full_msg).pairing(public_key)
-    {
-        Ok(())
-    } else {
-        Err(InvalidInput)
-    }
-}
-
 #[traced_test]
 #[tokio::test]
 async fn test_staleness_check() {
@@ -484,7 +448,9 @@ async fn test_staleness_check() {
     tc.add_open_server_with_allowed_staleness(seal_package, Duration::from_secs(2))
         .await;
 
-    let (examples_package_id, _) = tc.publish("patterns").await;
+    let (examples_package_id, _) = tc
+        .publish_with_deps("patterns", vec![("seal", seal_package)])
+        .await;
     let (whitelist, cap, initial_shared_version) =
         create_whitelist(tc.test_cluster(), examples_package_id).await;
 

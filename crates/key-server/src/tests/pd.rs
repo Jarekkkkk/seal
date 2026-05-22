@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::tests::externals::get_key;
-use crate::tests::SealTestCluster;
-use sui_sdk::{json::SuiJsonValue, rpc_types::ObjectChange};
+use crate::tests::{ExecutedTransactionTestExt, SealTestCluster};
+use sui_sdk::json::SuiJsonValue;
 use sui_types::base_types::{ObjectDigest, SequenceNumber};
 use sui_types::{
     base_types::{ObjectID, SuiAddress},
@@ -19,8 +19,10 @@ use tracing_test::traced_test;
 async fn test_pd() {
     let mut tc = SealTestCluster::new(2, "seal").await;
 
-    let (package_id, _) = tc.publish("patterns").await;
     let (seal_package, _) = tc.publish("seal").await;
+    let (package_id, _) = tc
+        .publish_with_deps("patterns", vec![("seal", seal_package)])
+        .await;
 
     tc.add_open_server(seal_package).await;
 
@@ -70,7 +72,7 @@ pub(crate) async fn create_private_data(
     cluster: &TestCluster,
     package_id: ObjectID,
 ) -> (ObjectID, SequenceNumber, ObjectDigest) {
-    let builder = cluster.sui_client().transaction_builder();
+    let builder = cluster.grpc_client().transaction_builder();
     let tx = builder
         .move_call(
             cluster.get_address_0(),
@@ -90,43 +92,24 @@ pub(crate) async fn create_private_data(
         .unwrap();
     let response = cluster.sign_and_execute_transaction(&tx).await;
 
-    let mut pd: Option<ObjectID> = None;
-    for created in response.object_changes.unwrap() {
-        if let ObjectChange::Created {
-            object_type,
-            object_id,
-            ..
-        } = created
-        {
-            if object_type.name.as_str() == "PrivateData" {
-                pd.replace(object_id);
-            };
-        }
-    }
+    let pd = response
+        .find_created_object_by_type("PrivateData")
+        .expect("PrivateData object should be created");
 
-    let builder = cluster.sui_client().transaction_builder();
+    let builder = cluster.grpc_client().transaction_builder();
     let tx = builder
-        .transfer_object(cluster.get_address_0(), pd.unwrap(), None, 50_000_000, user)
+        .transfer_object(cluster.get_address_0(), pd, None, 50_000_000, user)
         .await
         .unwrap();
     let response = cluster.sign_and_execute_transaction(&tx).await;
     assert!(response.status_ok().unwrap());
-    for modified in response.object_changes.unwrap() {
-        if let ObjectChange::Mutated {
-            object_type,
-            object_id,
-            version,
-            digest,
-            ..
-        } = modified
-        {
-            if object_type.name.as_str() == "PrivateData" {
-                return (object_id, version, digest);
-            }
-        }
-    }
 
-    panic!("should have found the pd object");
+    let (id, version, digest_bytes) = response
+        .find_mutated_object_by_type("PrivateData")
+        .expect("should have found the pd object");
+
+    let digest = ObjectDigest::new(digest_bytes);
+    (id, version, digest)
 }
 
 async fn pd_create_ptb(

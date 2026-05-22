@@ -48,8 +48,6 @@ pub async fn push_metrics(
     client: &reqwest::Client,
     registry: &Registry,
 ) -> Result<(), anyhow::Error> {
-    tracing::debug!(config.push_url, "pushing metrics to remote");
-
     // now represents a collection timestamp for all of the metrics we send to the proxy.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -108,17 +106,16 @@ pub async fn push_metrics(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = match response.text().await {
-            Ok(body) => body,
-            Err(error) => format!("couldn't decode response body; {error}"),
-        };
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("couldn't decode response body; {error}"));
         return Err(anyhow::anyhow!(
             "metrics push failed: [{}]:{}",
             status,
             body
         ));
     }
-    tracing::debug!("successfully pushed metrics to {}", config.push_url);
     Ok(())
 }
 

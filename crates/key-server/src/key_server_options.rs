@@ -1,6 +1,7 @@
 // Copyright (c), Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::NetworkConfig;
 use crate::metrics_push::MetricsPushConfig;
 use crate::time::from_mins;
 use crate::types::Network;
@@ -64,50 +65,13 @@ pub enum ServerMode {
         key_server_obj_id: Address,
         /// The state of the committee: Active or Rotation.
         committee_state: CommitteeState,
+        /// Server name fetched from onchain PartialKeyServer (populated during initialization).
+        #[serde(skip)]
+        server_name: String,
     },
 }
 
-/// Configuration for the RPC client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcConfig {
-    /// The timeout for RPC requests.
-    pub timeout: Duration,
-
-    /// The retry configuration for RPC requests.
-    pub retry_config: RetryConfig,
-}
-
-impl Default for RpcConfig {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_secs(60),
-            retry_config: RetryConfig::default(),
-        }
-    }
-}
-
-/// Configuration for the retry logic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetryConfig {
-    /// The maximum number of retries.
-    pub max_retries: u32,
-
-    /// The minimum delay between retries.
-    pub min_delay: Duration,
-
-    /// The maximum delay between retries.
-    pub max_delay: Duration,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            min_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(10),
-        }
-    }
-}
+pub use key_server::sui_rpc_client::RpcConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyServerOptions {
@@ -117,12 +81,20 @@ pub struct KeyServerOptions {
     /// A custom node URL. If not set, the default for the given network is used.
     pub node_url: Option<String>,
 
-    /// If the server is open or permissioned.
+    /// If the server is open, permissioned, or committee.
     pub server_mode: ServerMode,
 
-    /// The minimum version of the SDK that is required to use this service.
-    #[serde(default = "default_sdk_version_requirement")]
-    pub sdk_version_requirement: VersionReq,
+    /// The minimum version of the client SDK that is required to use this key server.
+    #[serde(default = "default_ts_sdk_version_requirement")]
+    pub ts_sdk_version_requirement: VersionReq,
+
+    /// The minimum version of the Rust SDK that is required to use this key server.
+    #[serde(default = "default_rust_sdk_version_requirement")]
+    pub rust_sdk_version_requirement: VersionReq,
+
+    /// The minimum version of the aggregator that is required to use this key server.
+    #[serde(default = "default_aggregator_version_requirement")]
+    pub aggregator_version_requirement: VersionReq,
 
     #[serde(default = "default_metrics_host_port")]
     pub metrics_host_port: u16,
@@ -159,13 +131,17 @@ pub struct KeyServerOptions {
     pub metrics_push_config: Option<MetricsPushConfig>,
 }
 
-impl KeyServerOptions {
-    pub fn node_url(&self) -> &str {
-        self.node_url
-            .as_deref()
-            .unwrap_or_else(|| self.network.default_node_url())
+impl NetworkConfig for KeyServerOptions {
+    fn network(&self) -> &Network {
+        &self.network
     }
 
+    fn node_url_option(&self) -> &Option<String> {
+        &self.node_url
+    }
+}
+
+impl KeyServerOptions {
     pub fn new_open_server_with_default_values(
         network: Network,
         key_server_object_id: ObjectID,
@@ -173,7 +149,9 @@ impl KeyServerOptions {
         Self {
             network,
             node_url: None,
-            sdk_version_requirement: default_sdk_version_requirement(),
+            ts_sdk_version_requirement: default_ts_sdk_version_requirement(),
+            aggregator_version_requirement: default_aggregator_version_requirement(),
+            rust_sdk_version_requirement: default_rust_sdk_version_requirement(),
             server_mode: ServerMode::Open {
                 key_server_object_id,
             },
@@ -191,7 +169,9 @@ impl KeyServerOptions {
         Self {
             network,
             node_url: None,
-            sdk_version_requirement: default_sdk_version_requirement(),
+            ts_sdk_version_requirement: default_ts_sdk_version_requirement(),
+            aggregator_version_requirement: default_aggregator_version_requirement(),
+            rust_sdk_version_requirement: default_rust_sdk_version_requirement(),
             server_mode: ServerMode::Open {
                 key_server_object_id: ObjectID::random(),
             },
@@ -316,16 +296,23 @@ fn default_metrics_host_port() -> u16 {
     9184
 }
 
-fn default_sdk_version_requirement() -> VersionReq {
-    VersionReq::parse(">=0.4.5").expect("Failed to parse default SDK version requirement")
+fn default_ts_sdk_version_requirement() -> VersionReq {
+    VersionReq::parse(">=0.4.5").expect("Failed to parse default TSSDK version requirement")
 }
 
+fn default_aggregator_version_requirement() -> VersionReq {
+    VersionReq::parse(">=0.6.2").expect("Failed to parse default aggregator version requirement")
+}
+
+fn default_rust_sdk_version_requirement() -> VersionReq {
+    VersionReq::parse(">=0.0.0").expect("Failed to parse default Rust SDK version requirement")
+}
 #[test]
 fn test_parse_open_config() {
     use std::str::FromStr;
     let valid_configuration = r#"
 network: Mainnet
-sdk_version_requirement: '>=0.2.7'
+ts_sdk_version_requirement: '>=0.2.7'
 metrics_host_port: 1234
 server_mode: !Open
   key_server_object_id: '0x0000000000000000000000000000000000000000000000000000000000000002'
@@ -337,7 +324,7 @@ session_key_ttl_max: '60s'
     let options: KeyServerOptions =
         serde_yaml::from_str(valid_configuration).expect("Failed to parse valid configuration");
     assert_eq!(options.network, Network::Mainnet);
-    assert_eq!(options.sdk_version_requirement.to_string(), ">=0.2.7");
+    assert_eq!(options.ts_sdk_version_requirement.to_string(), ">=0.2.7");
     assert_eq!(options.metrics_host_port, 1234);
 
     let expected_server_mode = ServerMode::Open {
@@ -383,7 +370,7 @@ fn test_parse_permissioned_config() {
     use std::str::FromStr;
     let valid_configuration = r#"
 network: Mainnet
-sdk_version_requirement: '>=0.2.7'
+ts_sdk_version_requirement: '>=0.2.7'
 metrics_host_port: 1234
 server_mode: !Permissioned
   client_configs:
@@ -566,4 +553,106 @@ server_mode: !Permissioned
         assert!(result.is_err(), "Expected validation to fail for: {yaml}");
         assert_eq!(result.unwrap_err().to_string(), expected_error);
     }
+}
+
+#[test]
+fn test_validate_committee_mode() {
+    use std::str::FromStr;
+
+    // Test Active state
+    let committee_active = r#"
+network: Mainnet
+server_mode: !Committee
+  member_address: "0x1234567890123456789012345678901234567890123456789012345678901234"
+  key_server_obj_id: "0xabcdef0000000000000000000000000000000000000000000000000000000001"
+  committee_state: Active
+"#;
+
+    let options: KeyServerOptions =
+        serde_yaml::from_str(committee_active).expect("Failed to parse committee active config");
+    assert_eq!(options.network, Network::Mainnet);
+
+    if let ServerMode::Committee {
+        member_address,
+        key_server_obj_id,
+        committee_state,
+        ..
+    } = &options.server_mode
+    {
+        assert_eq!(
+            member_address,
+            &Address::from_str(
+                "0x1234567890123456789012345678901234567890123456789012345678901234"
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            key_server_obj_id,
+            &Address::from_str(
+                "0xabcdef0000000000000000000000000000000000000000000000000000000001"
+            )
+            .unwrap()
+        );
+        assert_eq!(committee_state, &CommitteeState::Active);
+    } else {
+        panic!("Expected Committee mode");
+    }
+
+    // Validate should pass for committee mode
+    assert!(options.validate().is_ok());
+
+    // Test Rotation state
+    let committee_rotation = r#"
+network: Testnet
+server_mode: !Committee
+  member_address: "0x9876543210987654321098765432109876543210987654321098765432109876"
+  key_server_obj_id: "0xfedcba0000000000000000000000000000000000000000000000000000000002"
+  committee_state: !Rotation
+    target_version: 5
+"#;
+
+    let options: KeyServerOptions = serde_yaml::from_str(committee_rotation)
+        .expect("Failed to parse committee rotation config");
+    assert_eq!(options.network, Network::Testnet);
+
+    if let ServerMode::Committee {
+        member_address,
+        key_server_obj_id,
+        committee_state,
+        ..
+    } = &options.server_mode
+    {
+        assert_eq!(
+            member_address,
+            &Address::from_str(
+                "0x9876543210987654321098765432109876543210987654321098765432109876"
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            key_server_obj_id,
+            &Address::from_str(
+                "0xfedcba0000000000000000000000000000000000000000000000000000000002"
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            committee_state,
+            &CommitteeState::Rotation { target_version: 5 }
+        );
+    } else {
+        panic!("Expected Committee mode");
+    }
+
+    // Validate should pass for committee mode with rotation
+    assert!(options.validate().is_ok());
+
+    // Test get_supported_key_server_object_ids for committee mode
+    assert_eq!(
+        options.get_supported_key_server_object_ids(),
+        vec![ObjectID::from_str(
+            "0xfedcba0000000000000000000000000000000000000000000000000000000002"
+        )
+        .unwrap()]
+    );
 }

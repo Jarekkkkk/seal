@@ -9,6 +9,10 @@ license.workspace = true
 name = "key-server"
 path = "src/server.rs"
 
+[[bin]]
+name = "aggregator-server"
+path = "src/aggregator/server.rs"
+
 [dependencies]
 crypto = { path = "../crypto" }
 seal-sdk = { path = "../seal-sdk" }
@@ -53,11 +57,14 @@ http-body-util = "0.1.2"
 
 sui-sdk-types.workspace = true
 sui-rpc.workspace = true
-mvr_types = { git = "https://github.com/MystenLabs/mvr", rev = "1993d7188f62564b05f0ccab46bbfb24b0eea326", package = "mvr-types" }
+sui-rpc-api.workspace = true
+mvr_types = { git = "https://github.com/MystenLabs/mvr", rev = "b4771074967c733edd3a8e09611a40e1c181d84a", package = "mvr-types" }
 
 [dev-dependencies]
 tracing-test = "0.2.5"
 test-cluster = { workspace = true }
 sui-move-build = { workspace = true }
+move-package-alt = { workspace = true }
 temp-env = { version = "0.3", features = ["async_closure"] }
 fastcrypto-tbls = { workspace = true }
+wiremock = "0.5"

@@ -16,6 +16,7 @@ use fastcrypto::groups::bls12381::{G1Element, G2Element, Scalar};
 use fastcrypto::serde_helpers::ToFromByteArray;
 use rand::thread_rng;
 use reqwest::Body;
+use seal_committee::Network;
 use seal_sdk::types::{FetchKeyRequest, FetchKeyResponse};
 use seal_sdk::IBEPublicKey;
 use serde::{Deserialize, Serialize};
@@ -41,18 +42,11 @@ pub struct KeyServerInfo {
 /// Fetch and parse key server object from fullnode.
 /// TODO: rewrite with sui-rust-sdk
 pub async fn fetch_key_server_urls(
+    network: &Network,
     key_server_ids: &[ObjectID],
-    network: &str,
+    custom_rpc_url: Option<String>,
 ) -> Result<Vec<KeyServerInfo>, FastCryptoError> {
-    let sui_rpc = match network {
-        "mainnet" => "https://fullnode.mainnet.sui.io:443",
-        "testnet" => "https://fullnode.testnet.sui.io:443",
-        _ => {
-            return Err(FastCryptoError::GeneralError(format!(
-                "Invalid network: {network}. Use 'mainnet' or 'testnet'"
-            )))
-        }
-    };
+    let sui_rpc = custom_rpc_url.unwrap_or_else(|| network.default_rpc_url().to_string());
     let sui_client = SuiClientBuilder::default()
         .build(sui_rpc)
         .await
@@ -341,7 +335,11 @@ enum Command {
 
         /// Network (mainnet or testnet)
         #[arg(short = 'n', long, default_value = "testnet")]
-        network: String,
+        network: Network,
+
+        /// RPC URL override.
+        #[arg(long)]
+        rpc_url: Option<String>,
     },
     /// Fetch keys from Seal servers using encoded fetch keys request.
     FetchKeys {
@@ -359,7 +357,11 @@ enum Command {
 
         /// Network (mainnet or testnet)
         #[arg(short = 'n', long, default_value = "testnet")]
-        network: String,
+        network: Network,
+
+        /// RPC URL override.
+        #[arg(long)]
+        rpc_url: Option<String>,
     },
 }
 
@@ -501,9 +503,10 @@ async fn main() -> FastCryptoResult<()> {
             key_server_ids,
             threshold,
             network,
+            rpc_url,
         } => {
             // Fetch key server info including public keys from blockchain
-            let key_server_infos = fetch_key_server_urls(&key_server_ids, &network)
+            let key_server_infos = fetch_key_server_urls(&network, &key_server_ids, rpc_url)
                 .await
                 .map_err(|e| {
                     FastCryptoError::GeneralError(format!("Failed to fetch key server info: {e}"))
@@ -551,6 +554,7 @@ async fn main() -> FastCryptoResult<()> {
             key_server_ids,
             threshold,
             network,
+            rpc_url,
         } => {
             // Parse fetch keys request.
             let request: FetchKeyRequest = bcs::from_bytes(&request.0).map_err(|e| {
@@ -562,7 +566,7 @@ async fn main() -> FastCryptoResult<()> {
             // Fetch keys from key server urls and collect service id and its seal responses.
             let mut seal_responses = Vec::new();
             let client = reqwest::Client::new();
-            for server in &fetch_key_server_urls(&key_server_ids, &network)
+            for server in &fetch_key_server_urls(&network, &key_server_ids, rpc_url)
                 .await
                 .map_err(|e| {
                     FastCryptoError::GeneralError(format!("Failed to fetch key server URLs: {e}"))
@@ -575,7 +579,7 @@ async fn main() -> FastCryptoResult<()> {
                 match client
                     .post(format!("{}/v1/fetch_key", server.url))
                     .header("Client-Sdk-Type", "rust")
-                    .header("Client-Sdk-Version", "1.0.0")
+                    .header("Client-Sdk-Version", "0.0.0")
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         request.to_json_string().expect("should not fail"),
@@ -801,7 +805,7 @@ mod tests {
             "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
         )
         .unwrap()];
-        let key_servers = fetch_key_server_urls(&key_server_ids, "testnet")
+        let key_servers = fetch_key_server_urls(&Network::Testnet, &key_server_ids, None)
             .await
             .unwrap();
         assert_eq!(key_servers.len(), 1);
